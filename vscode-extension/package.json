@@ -1,0 +1,27 @@
+{
+  "name": "carbon-aware-analyzer",
+  "displayName": "Carbon-Aware Code Analyzer",
+  "description": "Highlights carbon-inefficient Python patterns and suggests greener alternatives inline.",
+  "version": "0.1.0",
+  "engines": { "vscode": "^1.74.0" },
+  "categories": ["Linters", "Other"],
+  "activationEvents": ["onLanguage:python"],
+  "main": "./extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Carbon Analyzer",
+      "properties": {
+        "carbonAnalyzer.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python interpreter used to run the analyzer."
+        },
+        "carbonAnalyzer.analyzerScript": {
+          "type": "string",
+          "default": "",
+          "description": "Full path to carbon_analyzer.py. Leave empty to auto-detect from extension folder."
+        }
+      }
+    }
+  }
+}
