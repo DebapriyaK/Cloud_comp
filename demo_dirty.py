@@ -85,3 +85,69 @@ def check_permission(user_id, allowed_members):
         return True
     return False
 
+
+# ── Pattern G8: manual dict with if/else instead of defaultdict ──────────
+def count_events_by_type(events):
+    """
+    Tally how many times each event type occurs in the analytics stream.
+    Manually checks if the key already exists before incrementing —
+    this is the pattern that defaultdict(int) eliminates cleanly.
+    """
+    counts = {}
+    for event in events:
+        event_type = event["action"]
+        if event_type in counts:          # G8: manual key-existence guard
+            counts[event_type] += 1
+        else:
+            counts[event_type] = 1
+    return counts
+
+
+def aggregate_session_durations(sessions):
+    """
+    Group total session duration (seconds) by country code.
+    Again uses the manual if/else dict pattern instead of defaultdict.
+    """
+    durations = {}
+    for session in sessions:
+        country = session.get("country", "unknown")
+        duration = session.get("duration_sec", 0)
+        if country in durations:          # G8: same manual pattern
+            durations[country] += duration
+        else:
+            durations[country] = duration
+    return durations
+
+
+# ── Pattern G9: while loop where a for loop is more appropriate ──────────
+def compute_retention_flags(user_ids, activity_log):
+    """
+    For each user ID decide whether they are 'retained' (appeared in the
+    activity log at least once in the last 30 days).
+    Uses a manual while loop with an index counter instead of a for loop.
+    """
+    retained = []
+    i = 0                                 # G9: manual index — while instead of for
+    while i < len(user_ids):
+        uid = user_ids[i]
+        if uid in activity_log:
+            retained.append(uid)
+        i += 1
+    return retained
+
+
+def paginate_results(records, page_size):
+    """
+    Split a flat list of records into fixed-size pages.
+    Uses a do-while simulation (while True … break) instead of a
+    straightforward for-range loop.
+    """
+    pages = []
+    idx = 0
+    while True:                           # G9: do-while simulation
+        chunk = records[idx: idx + page_size]
+        if not chunk:
+            break
+        pages.append(chunk)
+        idx += page_size
+    return pages
