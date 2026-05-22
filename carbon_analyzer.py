@@ -618,7 +618,7 @@ def _fmt_co2(g: float) -> str:
     return f"{g*1e9:.4f} ng"
 
 
-def report_rich(source_path: str, findings: list[Finding]) -> None:
+def report_rich(source_path: str, findings: list[Finding], grid: Optional[dict] = None) -> None:
     c = _console
 
     c.print()
@@ -626,7 +626,10 @@ def report_rich(source_path: str, findings: list[Finding]) -> None:
     c.print(f"[bold blue]Carbon Analysis  .  [cyan]{os.path.basename(source_path)}[/cyan][/bold blue]")
     c.print("[dim]" + "-" * 68 + "[/dim]")
     c.print(f"  Dataset: [dim]{DATASET_PATH}[/dim]")
-    c.print(f"  Grid   : India (IND)  ~708 gCO2eq / kWh")
+    if grid and grid.get("zone") and grid.get("current_intensity") is not None:
+        c.print(f"  Grid   : {grid['zone']}  ~{grid['current_intensity']} gCO2eq / kWh")
+    else:
+        c.print("  Grid   : (not configured)")
     c.print(f"  Found  : [bold]{len(findings)}[/bold] pattern(s)")
     c.print()
 
@@ -700,11 +703,14 @@ def report_rich(source_path: str, findings: list[Finding]) -> None:
     c.print()
 
 
-def report_plain(source_path: str, findings: list[Finding]) -> None:
+def report_plain(source_path: str, findings: list[Finding], grid: Optional[dict] = None) -> None:
     sep = "-" * 68
     print(f"\n{'='*68}")
     print(f"  Carbon Analysis  .  {os.path.basename(source_path)}")
-    print(f"  Grid: India (IND)  ~708 gCO2eq/kWh  |  {len(findings)} finding(s)")
+    if grid and grid.get("zone") and grid.get("current_intensity") is not None:
+        print(f"  Grid: {grid['zone']}  ~{grid['current_intensity']} gCO2eq/kWh  |  {len(findings)} finding(s)")
+    else:
+        print(f"  Grid: (not configured)  |  {len(findings)} finding(s)")
     print(f"{'='*68}\n")
 
     for i, f in enumerate(findings, 1):
@@ -763,6 +769,40 @@ def analyze(source_path: str):
     return sorted(detector.findings, key=lambda f: f.line), workload
 
 
+def _maybe_fetch_grid_context(workload: dict, json_mode: bool) -> Optional[dict]:
+    """
+    Optional live grid context (zone + current intensity).
+
+    - Requires an ElectricityMaps API key via env var.
+    - Disabled by default in JSON mode to avoid extra API calls in the VS Code
+      extension (which already calls grid_advisor.py separately).
+    """
+    key = (
+        os.environ.get("ELECTRICITYMAPS_API_KEY")
+        or os.environ.get("CARBON_ANALYZER_ELECTRICITYMAPS_API_KEY")
+    )
+    if not key:
+        return None
+
+    if json_mode and os.environ.get("CARBON_ANALYZER_INCLUDE_GRID_JSON") not in {"1", "true", "yes"}:
+        return None
+
+    zone = (
+        os.environ.get("ELECTRICITYMAPS_ZONE")
+        or os.environ.get("CARBON_ANALYZER_ZONE")
+        or "auto"
+    )
+
+    try:
+        import grid_advisor
+        advice = grid_advisor.advise(zone, key, include_deploy=False)
+        if advice.get("error"):
+            return None
+        return {"zone": advice.get("zone"), "current_intensity": advice.get("current_intensity")}
+    except Exception:
+        return None
+
+
 def main() -> None:
     args = sys.argv[1:]
     json_mode = "--json" in args
@@ -783,6 +823,7 @@ def main() -> None:
         sys.exit(1)
 
     findings, workload = analyze(path)
+    grid = _maybe_fetch_grid_context(workload, json_mode=json_mode)
 
     if json_mode:
         import json
@@ -811,14 +852,15 @@ def main() -> None:
                 for f in findings
             ],
             "workload": workload,
+            "grid": grid,
         }
         print(json.dumps(output))
         return
 
     if _RICH:
-        report_rich(path, findings)
+        report_rich(path, findings, grid=grid)
     else:
-        report_plain(path, findings)
+        report_plain(path, findings, grid=grid)
 
 
 if __name__ == "__main__":

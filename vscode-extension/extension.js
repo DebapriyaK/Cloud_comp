@@ -189,7 +189,11 @@ function runGridAdvisor(doc, workload) {
     const advisorPath = path.join(baseDir, 'grid_advisor.py');
 
     const args = ['--zone', zone, '--key', apiKey];
-    if (workload.has_deploy) args.push('--deploy');
+    // Always include live cloud-region recommendations for non-light workloads.
+    // (Previously gated on deploy-signal detection only.)
+    if (workload && (workload.tier === 'heavy' || workload.tier === 'moderate')) {
+        args.push('--deploy');
+    }
 
     let stdout = '';
     let stderr = '';
@@ -372,7 +376,7 @@ function buildGridHover(document, advice) {
 > Running at **${bt.time_ist} IST** tonight uses ${saving} less carbon than running now.${regionSection}
 
 ---
-*Live data via ElectricityMaps · Sandbox (±30% variance) · Carbon-Aware Code Analyzer*`
+*Live data via ElectricityMaps ·  Carbon-Aware Code Analyzer*`
     );
 
     markdown.isTrusted = true;
