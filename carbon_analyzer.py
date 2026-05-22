@@ -47,6 +47,32 @@ DATASET_PATH       = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 DEFAULT_N          = 100_000  # used when size cannot be inferred statically
 REDUCTION_THRESH   = 0.05     # suppress suggestions whose savings < 5 %
 
+# ---------------------------------------------------------------------------
+# COMPLEXITY SCORING — CONSTANTS
+# ---------------------------------------------------------------------------
+IMPORT_WEIGHTS = {
+    'tensorflow': 40, 'torch': 40, 'keras': 40, 'jax': 40,
+    'transformers': 40, 'mxnet': 35, 'paddle': 35, 'flax': 35,
+    'sklearn': 25, 'xgboost': 25, 'lightgbm': 25, 'catboost': 25,
+    'cv2': 20, 'skimage': 20, 'scipy': 20, 'dask': 20,
+    'ray': 20, 'cupy': 30, 'rapids': 30,
+    'numpy': 15, 'pandas': 15, 'polars': 15,
+    'PIL': 10, 'sympy': 10, 'multiprocessing': 10, 'concurrent': 10,
+    'matplotlib': 5, 'seaborn': 5, 'plotly': 5, 'bokeh': 5,
+}
+
+HEAVY_METHODS = {
+    'fit': 25, 'fit_transform': 25, 'train': 25,
+    'forward': 20, 'backward': 20,
+    'predict': 15, 'evaluate': 15, 'transform': 10,
+    'VideoCapture': 15, 'imread': 10, 'imwrite': 10,
+    'read_csv': 10, 'read_parquet': 10, 'read_excel': 10,
+    'matmul': 15, 'dot': 10, 'einsum': 15,
+}
+
+DEPLOY_IMPORTS = {'boto3', 'paramiko', 'docker', 'fabric', 'kubernetes', 'ansible'}
+DEPLOY_FILES   = {'Dockerfile', 'requirements.txt', 'docker-compose.yml', '.dockerignore'}
+
 
 # ===========================================================================
 # DATASET LAYER
@@ -445,6 +471,131 @@ class PatternDetector(ast.NodeVisitor):
 
 
 # ===========================================================================
+# COMPLEXITY SCORER
+# ===========================================================================
+
+class ComplexityScorer(ast.NodeVisitor):
+    """
+    Single-pass AST walker that assigns a composite complexity score.
+
+    Scoring:
+      - Import weights  (from IMPORT_WEIGHTS)
+      - Heavy method calls (from HEAVY_METHODS, capped at 2 occurrences each)
+      - Nested loops:   each nesting depth level adds 10 * depth
+      - Matrix ops:     np.matmul / @ operator each add 10
+
+    Tiers  (score thresholds):
+      0-20   →  light     (pattern suggestions only)
+      21-50  →  moderate  (pattern suggestions + schedule advice)
+      51+    →  heavy     (pattern suggestions + schedule advice + cloud regions)
+    """
+
+    def __init__(self):
+        self.score: int = 0
+        self.signals: list[str] = []
+        self._method_counts: dict[str, int] = {}
+        self._loop_depth: int = 0
+        self._scored_depths: set[int] = set()  # avoid double-counting same depth
+        self.has_deploy: bool = False
+
+    # -- Imports ---------------------------------------------------------------
+    def visit_Import(self, node: ast.Import):
+        for alias in node.names:
+            root = alias.name.split(".")[0]
+            self._score_import(root)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom):
+        if node.module:
+            root = node.module.split(".")[0]
+            self._score_import(root)
+        self.generic_visit(node)
+
+    def _score_import(self, root: str):
+        if root in DEPLOY_IMPORTS:
+            self.has_deploy = True
+            self.signals.append(f"deploy-import:{root}")
+        w = IMPORT_WEIGHTS.get(root, 0)
+        if w:
+            self.score += w
+            self.signals.append(f"import:{root}(+{w})")
+
+    # -- Method calls ----------------------------------------------------------
+    def visit_Call(self, node: ast.Call):
+        method = None
+        if isinstance(node.func, ast.Attribute):
+            method = node.func.attr
+        elif isinstance(node.func, ast.Name):
+            method = node.func.id
+
+        if method and method in HEAVY_METHODS:
+            count = self._method_counts.get(method, 0)
+            if count < 2:   # cap at 2 occurrences
+                w = HEAVY_METHODS[method]
+                self.score += w
+                self.signals.append(f"call:{method}(+{w})")
+                self._method_counts[method] = count + 1
+
+        # @ operator (MatMult) is handled in visit_BinOp
+        self.generic_visit(node)
+
+    # -- Matrix multiply operator ----------------------------------------------
+    def visit_BinOp(self, node: ast.BinOp):
+        if isinstance(node.op, ast.MatMult):
+            self.score += 10
+            self.signals.append("matmul-op(+10)")
+        self.generic_visit(node)
+
+    # -- Nested loops ----------------------------------------------------------
+    def _enter_loop(self, node):
+        self._loop_depth += 1
+        depth = self._loop_depth
+        if depth >= 2 and depth not in self._scored_depths:
+            pts = 10 * depth
+            self.score += pts
+            self.signals.append(f"nested-loop-depth-{depth}(+{pts})")
+            self._scored_depths.add(depth)
+        self.generic_visit(node)
+        self._loop_depth -= 1
+
+    def visit_For(self, node: ast.For):
+        self._enter_loop(node)
+
+    def visit_While(self, node: ast.While):
+        self._enter_loop(node)
+
+    def tier(self) -> str:
+        if self.score >= 51:
+            return "heavy"
+        if self.score >= 21:
+            return "moderate"
+        return "light"
+
+
+def score_complexity(source_path: str, tree: ast.AST) -> dict:
+    """
+    Run ComplexityScorer on *tree* and check workspace files for deploy signals.
+    Returns a dict with keys: score, tier, signals, has_deploy.
+    """
+    scorer = ComplexityScorer()
+    scorer.visit(tree)
+
+    # Check workspace files for deploy signals (independent of imports)
+    workspace = os.path.dirname(os.path.abspath(source_path))
+    for fname in DEPLOY_FILES:
+        if os.path.isfile(os.path.join(workspace, fname)):
+            scorer.has_deploy = True
+            scorer.signals.append(f"deploy-file:{fname}")
+
+    return {
+        "score":      scorer.score,
+        "tier":       scorer.tier(),
+        "signals":    scorer.signals,
+        "has_deploy": scorer.has_deploy,
+    }
+
+
+# ===========================================================================
 # REPORTER
 # ===========================================================================
 
@@ -586,7 +737,12 @@ def report_plain(source_path: str, findings: list[Finding]) -> None:
 # MAIN
 # ===========================================================================
 
-def analyze(source_path: str) -> list[Finding]:
+def analyze(source_path: str):
+    """
+    Returns (findings, workload) where:
+      findings  — list[Finding] sorted by line number
+      workload  — dict with score/tier/signals/has_deploy
+    """
     with open(source_path, encoding="utf-8") as f:
         source = f.read()
 
@@ -601,8 +757,10 @@ def analyze(source_path: str) -> list[Finding]:
     detector  = PatternDetector(var_types, db)
     detector.visit(tree)
 
-    # Sort by source line for a top-to-bottom reading experience
-    return sorted(detector.findings, key=lambda f: f.line)
+    # Pass 3: complexity scoring for workload tier
+    workload = score_complexity(source_path, tree)
+
+    return sorted(detector.findings, key=lambda f: f.line), workload
 
 
 def main() -> None:
@@ -624,7 +782,7 @@ def main() -> None:
             print(f"Error: file not found -- {path}")
         sys.exit(1)
 
-    findings = analyze(path)
+    findings, workload = analyze(path)
 
     if json_mode:
         import json
@@ -651,7 +809,8 @@ def main() -> None:
                     "estimated_n":  f.estimated_n,
                 }
                 for f in findings
-            ]
+            ],
+            "workload": workload,
         }
         print(json.dumps(output))
         return

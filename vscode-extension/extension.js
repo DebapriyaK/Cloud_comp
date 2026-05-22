@@ -11,7 +11,14 @@
  *          and quick-fix suggestion.
  *        • A diagnostic (info squiggle) under the flagged line so it also
  *          shows up in the Problems panel.
- *   3. Everything clears and re-runs on the next save.
+ *   3. For moderate/heavy workloads (ML, data-processing code) it also:
+ *        • Calls grid_advisor.py to fetch ElectricityMaps forecast.
+ *        • Adds an amber "🌱 run greener" decoration on line 1.
+ *        • Shows a scheduling hover tooltip on line 1 with: best run time
+ *          (in IST), current vs best intensity, % reduction.
+ *        • If deploy signals detected (boto3, Dockerfile, etc.): shows
+ *          greenest cloud region recommendations.
+ *   4. Everything clears and re-runs on the next save.
  */
 
 const vscode  = require('vscode');
@@ -28,18 +35,31 @@ const GREEN_FIX_DECO = vscode.window.createTextEditorDecorationType({
         fontWeight:      'normal',
         margin:          '0 0 0 12px',
     },
-    // Subtle green tint on the line itself
     backgroundColor:  'rgba(78, 201, 78, 0.07)',
+    isWholeLine:       false,
+});
+
+// ── Decoration type for the amber "🌱 run greener" label on line 1 ────────
+const GREEN_SCHEDULE_DECO = vscode.window.createTextEditorDecorationType({
+    after: {
+        contentText:     '  🌱 run greener',
+        color:           '#E6B84A',   // amber/golden
+        fontStyle:       'italic',
+        fontWeight:      'normal',
+        margin:          '0 0 0 12px',
+    },
+    backgroundColor:  'rgba(230, 184, 74, 0.07)',
     isWholeLine:       false,
 });
 
 // ── Diagnostic collection (Problems panel) ───────────────────────────────
 const DIAG_COLLECTION = vscode.languages.createDiagnosticCollection('carbon-analyzer');
 
-// ── In-memory cache: file URI string -> findings array ───────────────────
-const findingsCache = new Map();
+// ── In-memory caches ─────────────────────────────────────────────────────
+const findingsCache = new Map();   // uri -> findings[]
+const gridCache     = new Map();   // uri -> grid advice object
 
-// ── Debounce timer (avoid re-running on every keystroke if onChange used) ─
+// ── Debounce timer ────────────────────────────────────────────────────────
 let debounceTimer = null;
 
 
@@ -49,40 +69,33 @@ let debounceTimer = null;
 function activate(context) {
     console.log('Carbon-Aware Analyzer: activated');
 
-    // Run on save (primary trigger — matches the "just finished writing" UX)
     context.subscriptions.push(
         vscode.workspace.onDidSaveTextDocument(doc => {
-            if (doc.languageId === 'python') {
-                runAnalyzer(doc);
-            }
+            if (doc.languageId === 'python') runAnalyzer(doc);
         })
     );
 
-    // Run when a Python file is opened
     context.subscriptions.push(
         vscode.workspace.onDidOpenTextDocument(doc => {
-            if (doc.languageId === 'python') {
-                runAnalyzer(doc);
-            }
+            if (doc.languageId === 'python') runAnalyzer(doc);
         })
     );
 
-    // Re-apply decorations when switching editor tabs (cache is still valid)
     context.subscriptions.push(
         vscode.window.onDidChangeActiveTextEditor(editor => {
             if (editor && editor.document.languageId === 'python') {
-                const cached = findingsCache.get(editor.document.uri.toString());
-                if (cached) applyDecorations(editor, cached);
+                const uri = editor.document.uri.toString();
+                const cachedFindings = findingsCache.get(uri);
+                const cachedGrid     = gridCache.get(uri);
+                if (cachedFindings) applyDecorations(editor, cachedFindings, cachedGrid);
             }
         })
     );
 
-    // Analyze any already-open Python files on startup
     vscode.workspace.textDocuments.forEach(doc => {
         if (doc.languageId === 'python') runAnalyzer(doc);
     });
 
-    // Register hover provider for Python files
     context.subscriptions.push(
         vscode.languages.registerHoverProvider(
             { language: 'python' },
@@ -90,9 +103,9 @@ function activate(context) {
         )
     );
 
-    // Clean up on deactivate
     context.subscriptions.push(DIAG_COLLECTION);
     context.subscriptions.push(GREEN_FIX_DECO);
+    context.subscriptions.push(GREEN_SCHEDULE_DECO);
 }
 
 
@@ -103,15 +116,12 @@ function runAnalyzer(doc) {
     const config      = vscode.workspace.getConfiguration('carbonAnalyzer');
     const pythonPath  = config.get('pythonPath') || 'python';
 
-    // Resolve path to carbon_analyzer.py
     let scriptPath = config.get('analyzerScript') || '';
     if (!scriptPath) {
-        // Auto-detect: the script lives one directory above this extension folder
         scriptPath = path.join(__dirname, '..', 'carbon_analyzer.py');
     }
 
     const filePath = doc.uri.fsPath;
-
     let stdout = '';
     let stderr = '';
 
@@ -124,7 +134,6 @@ function runAnalyzer(doc) {
 
     proc.on('close', code => {
         if (stderr) {
-            // Only log actual errors, not codecarbon INFO noise
             const realErrors = stderr.split('\n')
                 .filter(l => !l.includes('[codecarbon') && l.trim())
                 .join('\n');
@@ -132,44 +141,116 @@ function runAnalyzer(doc) {
         }
 
         let findings = [];
+        let workload = null;
         try {
             const parsed = JSON.parse(stdout);
             findings = parsed.findings || [];
+            workload = parsed.workload || null;
         } catch (e) {
             console.error('Carbon Analyzer: could not parse JSON output:', stdout.slice(0, 200));
             return;
         }
 
-        // Cache and apply
         findingsCache.set(doc.uri.toString(), findings);
 
         const editor = vscode.window.visibleTextEditors
             .find(e => e.document.uri.toString() === doc.uri.toString());
-        if (editor) applyDecorations(editor, findings);
+        if (editor) applyDecorations(editor, findings, gridCache.get(doc.uri.toString()));
 
         applyDiagnostics(doc, findings);
+
+        // Kick off grid advisor for moderate/heavy workloads
+        if (workload && (workload.tier === 'heavy' || workload.tier === 'moderate')) {
+            runGridAdvisor(doc, workload);
+        } else {
+            // Clear any stale grid decoration
+            gridCache.delete(doc.uri.toString());
+            if (editor) applyDecorations(editor, findings, null);
+        }
     });
 }
 
 
 // ─────────────────────────────────────────────────────────────────────────
-// APPLY DECORATIONS  ("⚡ green fix" label at end of first line of block)
+// RUN GRID ADVISOR
 // ─────────────────────────────────────────────────────────────────────────
-function applyDecorations(editor, findings) {
-    const ranges = findings.map(f => {
-        // line is 1-based in our JSON; VS Code ranges are 0-based
+function runGridAdvisor(doc, workload) {
+    const config     = vscode.workspace.getConfiguration('carbonAnalyzer');
+    const pythonPath = config.get('pythonPath') || 'python';
+    const apiKey     = config.get('electricityMapsApiKey') || '';
+    const zone       = config.get('gridZone') || 'IN-SO';
+
+    if (!apiKey) return;   // silently skip if not configured
+
+    let scriptPath = config.get('analyzerScript') || '';
+    const baseDir  = scriptPath
+        ? path.dirname(scriptPath)
+        : path.join(__dirname, '..');
+    const advisorPath = path.join(baseDir, 'grid_advisor.py');
+
+    const args = ['--zone', zone, '--key', apiKey];
+    if (workload.has_deploy) args.push('--deploy');
+
+    let stdout = '';
+    let stderr = '';
+
+    const proc = spawn(pythonPath, [advisorPath, ...args], { cwd: baseDir });
+
+    proc.stdout.on('data', chunk => stdout += chunk.toString());
+    proc.stderr.on('data', chunk => stderr += chunk.toString());
+
+    proc.on('close', () => {
+        if (stderr && stderr.trim()) {
+            console.error('Grid Advisor stderr:', stderr.trim());
+        }
+
+        let advice = null;
+        try {
+            advice = JSON.parse(stdout);
+        } catch (e) {
+            console.error('Grid Advisor: could not parse JSON:', stdout.slice(0, 200));
+            return;
+        }
+
+        if (advice && !advice.error) {
+            gridCache.set(doc.uri.toString(), advice);
+
+            const editor = vscode.window.visibleTextEditors
+                .find(e => e.document.uri.toString() === doc.uri.toString());
+            const findings = findingsCache.get(doc.uri.toString()) || [];
+            if (editor) applyDecorations(editor, findings, advice);
+        }
+    });
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// APPLY DECORATIONS
+// ─────────────────────────────────────────────────────────────────────────
+function applyDecorations(editor, findings, gridAdvice) {
+    // Green fix decorations on each flagged line
+    const fixRanges = findings.map(f => {
         const lineIndex = Math.max(0, f.line - 1);
         const lineText  = editor.document.lineAt(lineIndex).text;
         const endChar   = lineText.length;
         return new vscode.Range(lineIndex, endChar, lineIndex, endChar);
     });
+    editor.setDecorations(GREEN_FIX_DECO, fixRanges);
 
-    editor.setDecorations(GREEN_FIX_DECO, ranges);
+    // Schedule decoration on line 0 (first line of file) when grid advice available
+    if (gridAdvice && gridAdvice.best_time && gridAdvice.best_time.time_ist) {
+        const firstLine = editor.document.lineAt(0).text;
+        const endChar   = firstLine.length;
+        const schedRange = new vscode.Range(0, endChar, 0, endChar);
+        editor.setDecorations(GREEN_SCHEDULE_DECO, [schedRange]);
+    } else {
+        editor.setDecorations(GREEN_SCHEDULE_DECO, []);
+    }
 }
 
 
 // ─────────────────────────────────────────────────────────────────────────
-// APPLY DIAGNOSTICS  (info squiggle under first line, shows in Problems)
+// APPLY DIAGNOSTICS
 // ─────────────────────────────────────────────────────────────────────────
 function applyDiagnostics(doc, findings) {
     const diagnostics = findings.map(f => {
@@ -192,19 +273,30 @@ function applyDiagnostics(doc, findings) {
 
 
 // ─────────────────────────────────────────────────────────────────────────
-// HOVER PROVIDER  (rich tooltip when hovering over a flagged line)
+// HOVER PROVIDER
 // ─────────────────────────────────────────────────────────────────────────
 function provideHover(document, position) {
-    const findings = findingsCache.get(document.uri.toString());
+    const uri      = document.uri.toString();
+    const findings = findingsCache.get(uri);
+    const advice   = gridCache.get(uri);
+
+    // ── Grid advice hover: triggered on line 0 when advice is present ──────
+    if (position.line === 0 && advice && advice.best_time && advice.best_time.time_ist) {
+        return buildGridHover(document, advice);
+    }
+
+    // ── Pattern finding hover ─────────────────────────────────────────────
     if (!findings || findings.length === 0) return null;
 
-    // Find a finding whose block contains the hovered line (1-based)
-    const hoveredLine = position.line + 1;   // convert back to 1-based
+    const hoveredLine = position.line + 1;
     const f = findings.find(f => hoveredLine >= f.line && hoveredLine <= f.end_line);
     if (!f) return null;
 
-    const confIcon = f.confidence === 'CONFIRMED' ? '🟢' :
-                     f.confidence === 'LIKELY'    ? '🟡' : '🟡';
+    return buildFindingHover(document, f);
+}
+
+function buildFindingHover(document, f) {
+    const confIcon = f.confidence === 'CONFIRMED' ? '🟢' : '🟡';
 
     const reductionLine = f.reduction_pct
         ? `**CO2 reduction: ${f.reduction_pct}%**  ${progressBar(f.reduction_pct)}`
@@ -243,13 +335,51 @@ ${suggestionCode}
     markdown.isTrusted = true;
     markdown.supportHtml = false;
 
-    // Hover range covers the entire flagged block
-    const startLine = Math.max(0, f.line - 1);
-    const endLine   = Math.max(0, f.end_line - 1);
+    const startLine  = Math.max(0, f.line - 1);
+    const endLine    = Math.max(0, f.end_line - 1);
     const hoverRange = new vscode.Range(
         startLine, 0,
-        endLine,   document.lineAt(endLine).text.length
+        endLine, document.lineAt(endLine).text.length
     );
+
+    return new vscode.Hover(markdown, hoverRange);
+}
+
+function buildGridHover(document, advice) {
+    const bt = advice.best_time;
+    const curr = advice.current_intensity ? `${advice.current_intensity} gCO2/kWh` : 'unknown';
+    const best = bt.intensity != null ? `${bt.intensity} gCO2/kWh` : 'unknown';
+    const saving = bt.reduction_pct != null ? `${bt.reduction_pct}%` : '?';
+
+    let regionSection = '';
+    if (advice.cloud_regions && advice.cloud_regions.length > 0) {
+        const rows = advice.cloud_regions
+            .slice(0, 4)
+            .map(r => `| ${r.provider} ${r.region} | ${r.location} | ${r.intensity_gco2_kwh} gCO2/kWh | −${r.saving_pct}% |`)
+            .join('\n');
+        regionSection = `\n---\n**Greenest Cloud Regions for Deployment**\n\n| Region | Location | Intensity | Savings |\n|---|---|---|---|\n${rows}`;
+    }
+
+    const markdown = new vscode.MarkdownString(
+`### 🌱 Run Greener — Grid Carbon Forecast
+
+**Zone:** ${advice.zone} &nbsp;·&nbsp; **Now:** ${curr}
+
+| Best window | Time (IST) | Intensity | CO2 saving |
+|---|---|---|---|
+| Next 24 h | **${bt.time_ist}** | ${best} | **−${saving}** |
+
+> Running at **${bt.time_ist} IST** tonight uses ${saving} less carbon than running now.${regionSection}
+
+---
+*Live data via ElectricityMaps · Sandbox (±30% variance) · Carbon-Aware Code Analyzer*`
+    );
+
+    markdown.isTrusted = true;
+    markdown.supportHtml = false;
+
+    const lineText   = document.lineAt(0).text;
+    const hoverRange = new vscode.Range(0, 0, 0, lineText.length);
 
     return new vscode.Hover(markdown, hoverRange);
 }

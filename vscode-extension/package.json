@@ -20,6 +20,16 @@
           "type": "string",
           "default": "",
           "description": "Full path to carbon_analyzer.py. Leave empty to auto-detect from extension folder."
+        },
+        "carbonAnalyzer.electricityMapsApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "ElectricityMaps API key for grid carbon intensity forecasts. Leave empty to disable scheduling advice."
+        },
+        "carbonAnalyzer.gridZone": {
+          "type": "string",
+          "default": "IN-SO",
+          "description": "ElectricityMaps zone code for your location (e.g. IN-SO for Southern India)."
         }
       }
     }

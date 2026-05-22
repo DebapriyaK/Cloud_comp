@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import carbon_analyzer; print\\('OK'\\)\")",
+      "Bash(python -c \"import grid_advisor; print\\('OK'\\)\")",
+      "Bash(python -c \"from carbon_analyzer import analyze, VarTypeVisitor, PatternDetector, load_dataset, DATASET_PATH; print\\('imports OK'\\); findings, workload = analyze\\('demo_interactive.py'\\); print\\(f'findings={len\\(findings\\)}, tier={workload[\\\\\"tier\\\\\"]}, score={workload[\\\\\"score\\\\\"]}'\\)\")",
+      "Bash(python carbon_analyzer.py --json benchmark_suite.py)",
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('findings:', len\\(d['findings']\\), '| tier:', d['workload']['tier'], '| score:', d['workload']['score'], '| signals:', d['workload']['signals'][:4]\\)\")",
+      "Bash(python grid_advisor.py --zone IN-SO --key cGy6hP78gusuUpt6rkb9 --deploy)"
+    ]
+  }
+}
