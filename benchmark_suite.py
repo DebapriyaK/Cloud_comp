@@ -203,6 +203,15 @@ def append_result(result: dict) -> None:
             writer.writeheader()
         writer.writerow(result)
 
+    # If DYNAMODB_TABLE is set, mirror every result to DynamoDB in real time.
+    # This lets all Kubernetes analyzer pods see the latest benchmarks immediately.
+    if os.environ.get("DYNAMODB_TABLE"):
+        try:
+            from aws_dataset import write_result_to_dynamodb
+            write_result_to_dynamodb(result)
+        except Exception as exc:
+            print(f"  [DynamoDB write skipped: {exc}]")
+
     print(
         f"  [{result['Operation_ID']}] N={result['Input_Size_N']:>7}  "
         f"E={result['Energy_Consumed_kWh']:.4e} kWh  "

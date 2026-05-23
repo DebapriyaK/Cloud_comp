@@ -743,6 +743,18 @@ def report_plain(source_path: str, findings: list[Finding], grid: Optional[dict]
 # MAIN
 # ===========================================================================
 
+def _load_db() -> dict:
+    """
+    Load the benchmark dataset.
+    If DYNAMODB_TABLE env var is set, fetch from DynamoDB (shared cloud source).
+    Otherwise fall back to the local CSV (development / offline mode).
+    """
+    if os.environ.get("DYNAMODB_TABLE"):
+        from aws_dataset import load_dataset_from_dynamodb
+        return load_dataset_from_dynamodb()
+    return load_dataset(DATASET_PATH)
+
+
 def analyze(source_path: str):
     """
     Returns (findings, workload) where:
@@ -759,7 +771,7 @@ def analyze(source_path: str):
     var_types.visit(tree)
 
     # Pass 2: detect patterns (requires the type map from pass 1)
-    db        = load_dataset(DATASET_PATH)
+    db        = _load_db()
     detector  = PatternDetector(var_types, db)
     detector.visit(tree)
 
