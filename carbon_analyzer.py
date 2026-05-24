@@ -618,14 +618,14 @@ def _fmt_co2(g: float) -> str:
     return f"{g*1e9:.4f} ng"
 
 
-def report_rich(source_path: str, findings: list[Finding], grid: Optional[dict] = None) -> None:
+def report_rich(source_path: str, findings: list[Finding], grid: Optional[dict] = None, db_source: str = "") -> None:
     c = _console
 
     c.print()
     c.print("[dim]" + "-" * 68 + "[/dim]")
     c.print(f"[bold blue]Carbon Analysis  .  [cyan]{os.path.basename(source_path)}[/cyan][/bold blue]")
     c.print("[dim]" + "-" * 68 + "[/dim]")
-    c.print(f"  Dataset: [dim]{DATASET_PATH}[/dim]")
+    c.print(f"  Dataset: [dim]{db_source}[/dim]")
     if grid and grid.get("zone") and grid.get("current_intensity") is not None:
         c.print(f"  Grid   : {grid['zone']}  ~{grid['current_intensity']} gCO2eq / kWh")
     else:
@@ -703,10 +703,11 @@ def report_rich(source_path: str, findings: list[Finding], grid: Optional[dict] 
     c.print()
 
 
-def report_plain(source_path: str, findings: list[Finding], grid: Optional[dict] = None) -> None:
+def report_plain(source_path: str, findings: list[Finding], grid: Optional[dict] = None, db_source: str = "") -> None:
     sep = "-" * 68
     print(f"\n{'='*68}")
     print(f"  Carbon Analysis  .  {os.path.basename(source_path)}")
+    print(f"  Dataset: {db_source}")
     if grid and grid.get("zone") and grid.get("current_intensity") is not None:
         print(f"  Grid: {grid['zone']}  ~{grid['current_intensity']} gCO2eq/kWh  |  {len(findings)} finding(s)")
     else:
@@ -743,23 +744,30 @@ def report_plain(source_path: str, findings: list[Finding], grid: Optional[dict]
 # MAIN
 # ===========================================================================
 
-def _load_db() -> dict:
+def _load_db() -> tuple:
     """
     Load the benchmark dataset.
-    If DYNAMODB_TABLE env var is set, fetch from DynamoDB (shared cloud source).
-    Otherwise fall back to the local CSV (development / offline mode).
+    Tries DynamoDB first (shared cloud source), falls back to local CSV
+    if DynamoDB is unreachable or credentials are missing.
+    Returns (db, source_label).
     """
-    if os.environ.get("DYNAMODB_TABLE"):
+    try:
         from aws_dataset import load_dataset_from_dynamodb
-        return load_dataset_from_dynamodb()
-    return load_dataset(DATASET_PATH)
+        db = load_dataset_from_dynamodb()
+        table = os.environ.get("DYNAMODB_TABLE", "carbon_emissions")
+        region = os.environ.get("AWS_REGION", "ap-south-1")
+        return db, f"DynamoDB  ({table} / {region})"
+    except Exception:
+        pass
+    return load_dataset(DATASET_PATH), f"Local CSV  ({DATASET_PATH})"
 
 
 def analyze(source_path: str):
     """
-    Returns (findings, workload) where:
+    Returns (findings, workload, db_source) where:
       findings  — list[Finding] sorted by line number
       workload  — dict with score/tier/signals/has_deploy
+      db_source — string describing where benchmark data came from
     """
     with open(source_path, encoding="utf-8") as f:
         source = f.read()
@@ -771,14 +779,14 @@ def analyze(source_path: str):
     var_types.visit(tree)
 
     # Pass 2: detect patterns (requires the type map from pass 1)
-    db        = _load_db()
+    db, db_source = _load_db()
     detector  = PatternDetector(var_types, db)
     detector.visit(tree)
 
     # Pass 3: complexity scoring for workload tier
     workload = score_complexity(source_path, tree)
 
-    return sorted(detector.findings, key=lambda f: f.line), workload
+    return sorted(detector.findings, key=lambda f: f.line), workload, db_source
 
 
 def _maybe_fetch_grid_context(workload: dict, json_mode: bool) -> Optional[dict]:
@@ -834,7 +842,7 @@ def main() -> None:
             print(f"Error: file not found -- {path}")
         sys.exit(1)
 
-    findings, workload = analyze(path)
+    findings, workload, db_source = analyze(path)
     grid = _maybe_fetch_grid_context(workload, json_mode=json_mode)
 
     if json_mode:
@@ -870,9 +878,9 @@ def main() -> None:
         return
 
     if _RICH:
-        report_rich(path, findings, grid=grid)
+        report_rich(path, findings, grid=grid, db_source=db_source)
     else:
-        report_plain(path, findings, grid=grid)
+        report_plain(path, findings, grid=grid, db_source=db_source)
 
 
 if __name__ == "__main__":

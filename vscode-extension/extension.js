@@ -141,6 +141,11 @@ function spawnAnalyzerProcess(config, filePath) {
     return {
         proc: spawn(pythonPath, [scriptPath, '--json', filePath], {
             cwd: path.dirname(scriptPath),
+            env: {
+                ...process.env,
+                DYNAMODB_TABLE: config.get('dynamoDbTable') || 'carbon_emissions',
+                AWS_REGION:     config.get('awsRegion')     || 'ap-south-1',
+            },
         }),
         label: 'local analyzer',
     };
