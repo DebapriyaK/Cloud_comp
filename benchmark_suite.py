@@ -767,7 +767,7 @@ def main() -> None:
     benchmark_group4()
     benchmark_group5()
     benchmark_group6()
-    benchmark_group7()
+    # benchmark_group7()  # skipped on EC2 — O(N²) too slow on t3.micro
     benchmark_group8()
     benchmark_group9()   # NEW: loop constructs
 
