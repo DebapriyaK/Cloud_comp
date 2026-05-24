@@ -1,0 +1,10 @@
+.git
+.claude
+__pycache__
+*.pyc
+*.pyo
+*.vsix
+vscode-extension/.vscode
+vscode-extension/*.vsix
+tests
+samples

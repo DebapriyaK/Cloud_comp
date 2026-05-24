@@ -3,6 +3,7 @@
   "displayName": "Carbon-Aware Code Analyzer",
   "description": "Highlights carbon-inefficient Python patterns and suggests greener alternatives inline.",
   "version": "0.1.0",
+  "publisher": "local",
   "engines": { "vscode": "^1.74.0" },
   "categories": ["Linters", "Other"],
   "activationEvents": ["onLanguage:python"],
@@ -11,15 +12,56 @@
     "configuration": {
       "title": "Carbon Analyzer",
       "properties": {
+        "carbonAnalyzer.executionMode": {
+          "type": "string",
+          "default": "docker",
+          "enum": ["auto", "docker", "local"],
+          "description": "How to run the analyzer. Docker is the normal packaged mode; auto uses local Python when carbon_analyzer.py is present."
+        },
+        "carbonAnalyzer.dockerExecutable": {
+          "type": "string",
+          "default": "docker",
+          "description": "Docker command used when executionMode is docker or auto selects Docker."
+        },
+        "carbonAnalyzer.dockerImage": {
+          "type": "string",
+          "default": "carbon-aware-analyzer:latest",
+          "description": "Docker image containing carbon_analyzer.py, grid_advisor.py, aws_dataset.py, and dependencies."
+        },
+        "carbonAnalyzer.dynamoDbTable": {
+          "type": "string",
+          "default": "carbon_emissions",
+          "description": "DynamoDB table used for benchmark emissions data. This is passed to the container as DYNAMODB_TABLE."
+        },
+        "carbonAnalyzer.awsRegion": {
+          "type": "string",
+          "default": "ap-south-1",
+          "description": "AWS region for DynamoDB. This is passed to the container as AWS_REGION."
+        },
+        "carbonAnalyzer.awsAccessKeyId": {
+          "type": "string",
+          "default": "",
+          "description": "AWS access key ID for DynamoDB. Leave empty to use AWS credentials from the VS Code process environment."
+        },
+        "carbonAnalyzer.awsSecretAccessKey": {
+          "type": "string",
+          "default": "",
+          "description": "AWS secret access key for DynamoDB. Leave empty to use AWS credentials from the VS Code process environment."
+        },
+        "carbonAnalyzer.awsSessionToken": {
+          "type": "string",
+          "default": "",
+          "description": "Optional AWS session token for temporary credentials."
+        },
         "carbonAnalyzer.pythonPath": {
           "type": "string",
           "default": "python",
-          "description": "Python interpreter used to run the analyzer."
+          "description": "Python interpreter used to run the analyzer in local mode."
         },
         "carbonAnalyzer.analyzerScript": {
           "type": "string",
           "default": "",
-          "description": "Full path to carbon_analyzer.py. Leave empty to auto-detect from extension folder."
+          "description": "Full path to carbon_analyzer.py for local mode. Leave empty to auto-detect from extension folder."
         },
         "carbonAnalyzer.electricityMapsApiKey": {
           "type": "string",

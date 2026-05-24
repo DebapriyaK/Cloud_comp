@@ -24,6 +24,7 @@
 const vscode  = require('vscode');
 const { spawn } = require('child_process');
 const path    = require('path');
+const fs      = require('fs');
 const os      = require('os');
 
 // ── Decoration type for the inline "⚡ green fix" label ───────────────────
@@ -61,6 +62,117 @@ const gridCache     = new Map();   // uri -> grid advice object
 
 // ── Debounce timer ────────────────────────────────────────────────────────
 let debounceTimer = null;
+
+const CONTAINER_APP_DIR = '/app';
+const CONTAINER_WORKSPACE = '/workspace';
+
+const ENV_PASSTHROUGH = [
+    'ELECTRICITYMAPS_LAT',
+    'ELECTRICITYMAPS_LON',
+    'CARBON_ANALYZER_LAT',
+    'CARBON_ANALYZER_LON',
+];
+
+const CONFIG_ENV = [
+    ['DYNAMODB_TABLE', 'dynamoDbTable'],
+    ['AWS_REGION', 'awsRegion'],
+    ['AWS_ACCESS_KEY_ID', 'awsAccessKeyId'],
+    ['AWS_SECRET_ACCESS_KEY', 'awsSecretAccessKey'],
+    ['AWS_SESSION_TOKEN', 'awsSessionToken'],
+];
+
+function resolveAnalyzerScript(config) {
+    const scriptPath = config.get('analyzerScript') || '';
+    return scriptPath || path.join(__dirname, '..', 'carbon_analyzer.py');
+}
+
+function getExecutionMode(config, scriptPath) {
+    const configured = config.get('executionMode') || 'auto';
+    if (configured === 'local' || configured === 'docker') return configured;
+    return fs.existsSync(scriptPath) ? 'local' : 'docker';
+}
+
+function getDockerExecutable(config) {
+    return config.get('dockerExecutable') || 'docker';
+}
+
+function getDockerImage(config) {
+    return config.get('dockerImage') || 'carbon-aware-analyzer:latest';
+}
+
+function addEnvArg(args, name, value) {
+    if (value) args.push('-e', `${name}=${value}`);
+}
+
+function getDockerEnvArgs(config) {
+    const args = [];
+    for (const [envName, settingName] of CONFIG_ENV) {
+        addEnvArg(args, envName, config.get(settingName) || process.env[envName]);
+    }
+    for (const name of ENV_PASSTHROUGH) {
+        addEnvArg(args, name, process.env[name]);
+    }
+    return args;
+}
+
+function spawnAnalyzerProcess(config, filePath) {
+    const scriptPath = resolveAnalyzerScript(config);
+    const mode = getExecutionMode(config, scriptPath);
+
+    if (mode === 'docker') {
+        const fileDir = path.dirname(filePath);
+        const containerPath = path.posix.join(CONTAINER_WORKSPACE, path.basename(filePath));
+        const args = [
+            'run', '--rm',
+            '-v', `${fileDir}:${CONTAINER_WORKSPACE}:ro`,
+            ...getDockerEnvArgs(config),
+            getDockerImage(config),
+            'python', path.posix.join(CONTAINER_APP_DIR, 'carbon_analyzer.py'),
+            '--json', containerPath,
+        ];
+
+        return {
+            proc: spawn(getDockerExecutable(config), args, { cwd: fileDir }),
+            label: 'Docker analyzer',
+        };
+    }
+
+    const pythonPath = config.get('pythonPath') || 'python';
+    return {
+        proc: spawn(pythonPath, [scriptPath, '--json', filePath], {
+            cwd: path.dirname(scriptPath),
+        }),
+        label: 'local analyzer',
+    };
+}
+
+function spawnGridAdvisorProcess(config, advisorArgs) {
+    const scriptPath = resolveAnalyzerScript(config);
+    const mode = getExecutionMode(config, scriptPath);
+
+    if (mode === 'docker') {
+        const args = [
+            'run', '--rm',
+            ...getDockerEnvArgs(config),
+            getDockerImage(config),
+            'python', path.posix.join(CONTAINER_APP_DIR, 'grid_advisor.py'),
+            ...advisorArgs,
+        ];
+
+        return {
+            proc: spawn(getDockerExecutable(config), args),
+            label: 'Docker grid advisor',
+        };
+    }
+
+    const pythonPath = config.get('pythonPath') || 'python';
+    const baseDir = path.dirname(scriptPath);
+    const advisorPath = path.join(baseDir, 'grid_advisor.py');
+    return {
+        proc: spawn(pythonPath, [advisorPath, ...advisorArgs], { cwd: baseDir }),
+        label: 'local grid advisor',
+    };
+}
 
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -113,24 +225,21 @@ function activate(context) {
 // RUN THE PYTHON ANALYZER
 // ─────────────────────────────────────────────────────────────────────────
 function runAnalyzer(doc) {
-    const config      = vscode.workspace.getConfiguration('carbonAnalyzer');
-    const pythonPath  = config.get('pythonPath') || 'python';
+    if (doc.uri.scheme !== 'file') return;
 
-    let scriptPath = config.get('analyzerScript') || '';
-    if (!scriptPath) {
-        scriptPath = path.join(__dirname, '..', 'carbon_analyzer.py');
-    }
-
+    const config = vscode.workspace.getConfiguration('carbonAnalyzer');
     const filePath = doc.uri.fsPath;
     let stdout = '';
     let stderr = '';
 
-    const proc = spawn(pythonPath, [scriptPath, '--json', filePath], {
-        cwd: path.dirname(scriptPath),
-    });
+    const { proc, label } = spawnAnalyzerProcess(config, filePath);
 
     proc.stdout.on('data', chunk => stdout += chunk.toString());
     proc.stderr.on('data', chunk => stderr += chunk.toString());
+
+    proc.on('error', err => {
+        console.error(`Carbon Analyzer: failed to start ${label}:`, err.message);
+    });
 
     proc.on('close', code => {
         if (stderr) {
@@ -138,6 +247,10 @@ function runAnalyzer(doc) {
                 .filter(l => !l.includes('[codecarbon') && l.trim())
                 .join('\n');
             if (realErrors) console.error('Analyzer stderr:', realErrors);
+        }
+        if (code !== 0 && !stdout.trim()) {
+            console.error(`Carbon Analyzer: ${label} exited with code ${code}`);
+            return;
         }
 
         let findings = [];
@@ -176,17 +289,10 @@ function runAnalyzer(doc) {
 // ─────────────────────────────────────────────────────────────────────────
 function runGridAdvisor(doc, workload) {
     const config     = vscode.workspace.getConfiguration('carbonAnalyzer');
-    const pythonPath = config.get('pythonPath') || 'python';
     const apiKey     = config.get('electricityMapsApiKey') || '';
     const zone       = config.get('gridZone') || 'IN-SO';
 
     if (!apiKey) return;   // silently skip if not configured
-
-    let scriptPath = config.get('analyzerScript') || '';
-    const baseDir  = scriptPath
-        ? path.dirname(scriptPath)
-        : path.join(__dirname, '..');
-    const advisorPath = path.join(baseDir, 'grid_advisor.py');
 
     const args = ['--zone', zone, '--key', apiKey];
     // Always include live cloud-region recommendations for non-light workloads.
@@ -198,14 +304,22 @@ function runGridAdvisor(doc, workload) {
     let stdout = '';
     let stderr = '';
 
-    const proc = spawn(pythonPath, [advisorPath, ...args], { cwd: baseDir });
+    const { proc, label } = spawnGridAdvisorProcess(config, args);
 
     proc.stdout.on('data', chunk => stdout += chunk.toString());
     proc.stderr.on('data', chunk => stderr += chunk.toString());
 
-    proc.on('close', () => {
+    proc.on('error', err => {
+        console.error(`Grid Advisor: failed to start ${label}:`, err.message);
+    });
+
+    proc.on('close', code => {
         if (stderr && stderr.trim()) {
             console.error('Grid Advisor stderr:', stderr.trim());
+        }
+        if (code !== 0 && !stdout.trim()) {
+            console.error(`Grid Advisor: ${label} exited with code ${code}`);
+            return;
         }
 
         let advice = null;

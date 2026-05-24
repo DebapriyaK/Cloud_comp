@@ -1,35 +1,71 @@
-# How to load the extension into VS Code
+# Carbon-Aware Analyzer VS Code Demo
 
-## Option A — Quickest (copy to extensions folder)
+This extension uses Docker and DynamoDB by default. The user does not need the
+analyzer Python files locally.
 
-1. Open a terminal and run:
+## One-time setup
 
-   ```
-   xcopy /E /I "d:\College Stuff\SEM6\cc\final\vscode-extension" "%USERPROFILE%\.vscode\extensions\carbon-aware-analyzer"
-   ```
+1. Install and start Docker Desktop.
 
-2. Restart VS Code completely (close and reopen).
+2. Make sure the analyzer image exists:
 
-3. Open any Python file, write some code, and hit **Ctrl+S**.
-
----
-
-## Option B — Developer mode (no copy needed, easier to update)
-
-1. Open the `vscode-extension` folder in VS Code:
-   ```
-   code "d:\College Stuff\SEM6\cc\final\vscode-extension"
+   ```powershell
+   docker build -t carbon-aware-analyzer:latest ..
    ```
 
-2. Press **F5** — this opens a new VS Code window (Extension Development Host)
-   with the extension already loaded.
+   Run that command from inside the `vscode-extension` folder, or build from
+   the repository root with:
 
-3. In that new window, open any Python file and save it.
+   ```powershell
+   docker build -t carbon-aware-analyzer:latest .
+   ```
 
----
+3. Install the packaged extension:
 
-## Verify it works
+   ```powershell
+   code --install-extension .\carbon-aware-analyzer-0.1.0.vsix --force
+   ```
 
-Open any Python file with inefficient code and save.  
-You should see **⚡ green fix** in green italic at the end of flagged lines.  
-Hover over the line to see the full carbon comparison and quick fix.
+## Use
+
+Configure DynamoDB access in VS Code settings:
+
+```json
+{
+  "carbonAnalyzer.executionMode": "docker",
+  "carbonAnalyzer.dockerImage": "carbon-aware-analyzer:latest",
+  "carbonAnalyzer.dynamoDbTable": "carbon_emissions",
+  "carbonAnalyzer.awsRegion": "ap-south-1",
+  "carbonAnalyzer.awsAccessKeyId": "YOUR_AWS_ACCESS_KEY_ID",
+  "carbonAnalyzer.awsSecretAccessKey": "YOUR_AWS_SECRET_ACCESS_KEY"
+}
+```
+
+If you use temporary AWS credentials, also set:
+
+```json
+{
+  "carbonAnalyzer.awsSessionToken": "YOUR_AWS_SESSION_TOKEN"
+}
+```
+
+Open any Python file in a normal VS Code window and save it.
+
+The extension runs:
+
+```text
+docker run --rm -v <user-file-folder>:/workspace:ro -e DYNAMODB_TABLE=... -e AWS_REGION=... carbon-aware-analyzer:latest python /app/carbon_analyzer.py --json /workspace/<file>.py
+```
+
+The JSON result is shown as green line hints, hover text, and Problems panel
+diagnostics.
+
+Amber scheduling advice also needs an ElectricityMaps API key in VS Code
+settings:
+
+```json
+{
+  "carbonAnalyzer.electricityMapsApiKey": "YOUR_KEY",
+  "carbonAnalyzer.gridZone": "IN-SO"
+}
+```
